@@ -2414,7 +2414,8 @@ class App(ctk.CTk):
                     analysis += f"Standard Deviation: {np.std(thickness_data):.2f} mm\n"
                     
                     # Thickness variation
-                    thickness_variation = (max(thickness_data) - min(thickness_data)) / avg_thickness if thickness_data else 0
+                    avg_thickness = sum(thickness_data) / len(thickness_data) if thickness_data else 0
+                    thickness_variation = (max(thickness_data) - min(thickness_data)) / avg_thickness if avg_thickness else 0
                     analysis += f"Thickness Variation: {thickness_variation*100:.1f}%\n"
                 
                 # Coating analysis
