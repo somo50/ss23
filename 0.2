@@ -1,0 +1,1554 @@
+import os
+import json
+import csv
+import tkinter as tk
+from tkinter import font as tkfont, filedialog, messagebox, ttk
+from datetime import datetime
+from pathlib import Path
+import customtkinter as ctk
+import numpy as np
+from openpyxl import load_workbook, Workbook
+from openpyxl.styles import Font, Alignment
+from tabulate import tabulate
+from PIL import Image, ImageDraw, ImageFont, ImageTk
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import cm
+from reportlab.lib.colors import HexColor
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import Paragraph, Frame, KeepInFrame, Table, TableStyle, Image as RLImage, PageBreak, SimpleDocTemplate
+from reportlab.lib.enums import TA_RIGHT, TA_CENTER, TA_LEFT
+from reportlab.lib import colors
+import arabic_reshaper
+from bidi.algorithm import get_display
+import tempfile
+import shutil
+
+# --------------------------------------------------
+APP_DIR    = Path(__file__).parent
+MEMORY_DIR = APP_DIR / "memory"
+MEMORY_DIR.mkdir(exist_ok=True)
+MEMORY_FILE   = MEMORY_DIR / "memory.json"
+SETTINGS_FILE = APP_DIR / "settings.json"
+FONTS_DIR = APP_DIR / "fonts"
+FONTS_DIR.mkdir(exist_ok=True)
+
+# Download and register fonts for better Arabic support
+def setup_fonts():
+    try:
+        # Try to register Arial and Times New Roman for PDF generation
+        arial_path = FONTS_DIR / "Arial.ttf"
+        arial_bold_path = FONTS_DIR / "Arial_Bold.ttf"
+        times_path = FONTS_DIR / "Times_New_Roman.ttf"
+        times_bold_path = FONTS_DIR / "Times_New_Roman_Bold.ttf"
+        
+        # Register fonts with ReportLab
+        try:
+            pdfmetrics.registerFont(TTFont('Arial', str(arial_path)))
+            pdfmetrics.registerFont(TTFont('Arial-Bold', str(arial_bold_path)))
+        except:
+            # Fallback to default fonts
+            try:
+                pdfmetrics.registerFont(TTFont('Arial', 'arial.ttf'))
+                pdfmetrics.registerFont(TTFont('Arial-Bold', 'arialbd.ttf'))
+            except:
+                # Use Helvetica as fallback
+                pdfmetrics.registerFont(TTFont('Arial', 'Helvetica'))
+                pdfmetrics.registerFont(TTFont('Arial-Bold', 'Helvetica-Bold'))
+            
+        try:
+            pdfmetrics.registerFont(TTFont('TimesNewRoman', str(times_path)))
+            pdfmetrics.registerFont(TTFont('TimesNewRoman-Bold', str(times_bold_path)))
+        except:
+            # Fallback to default fonts
+            try:
+                pdfmetrics.registerFont(TTFont('TimesNewRoman', 'times.ttf'))
+                pdfmetrics.registerFont(TTFont('TimesNewRoman-Bold', 'timesbd.ttf'))
+            except:
+                # Use Times-Roman as fallback
+                pdfmetrics.registerFont(TTFont('TimesNewRoman', 'Times-Roman'))
+                pdfmetrics.registerFont(TTFont('TimesNewRoman-Bold', 'Times-Bold'))
+    except Exception as e:
+        print(f"Font setup error: {e}")
+
+setup_fonts()
+
+# --------------------------------------------------
+def load_json(path, default=None):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return default or {}
+def save_json(path, data):
+    Path(path).write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+settings = load_json(
+    SETTINGS_FILE,
+    dict(
+        rtv_eq="thme - (2.331 * coth * 0.001)",
+        cr_eq="old_real_thickness - RTV",  # CR = old - RTV (كما طلبت)
+        theme="dark-blue",
+        last_excel="",
+        monospace=True,
+        pdf_settings={
+            "station_name": "Ultra-Pipe Inspection",
+            "spacing": 2,
+            "font_family": "Arial",
+            "font_size": 10,
+            "watermark_path": "",
+            "watermark_size": 30,
+            "watermark_opacity": 0.2,
+            "page_orientation": "portrait",
+            "margin_top": 1.0,
+            "margin_bottom": 1.0,
+            "margin_left": 1.0,
+            "margin_right": 1.0,
+            "include_interface": True,
+            "include_notes_at_end": True,
+            "interface_title": "Interface Screenshot",
+            "notes_title": "Notes and Images",
+            "header_font_size": 14,
+            "table_font_size": 10,
+            "notes_font_size": 10,
+            "table_border_color": "#000000",
+            "table_header_color": "#cccccc",
+            "table_row_color": "#f0f0f0",
+        }
+    ),
+)
+THEMES = {
+    "dark-blue": {"bg": "#2b2b2b", "entry": "#3f3f3f", "text": "#ffffff"},
+    "dark-green": {"bg": "#1e1e1e", "entry": "#2e2e2e", "text": "#ffffff"},
+    "sweet-red": {"bg": "#3a1c1c", "entry": "#4f2a2a", "text": "#ffffff"},
+    "purple": {"bg": "#2a1a2a", "entry": "#3c2a3c", "text": "#ffffff"},
+    "ocean": {"bg": "#e0f7fa", "entry": "#b2ebf2", "text": "#000000"},
+    "mint": {"bg": "#e8f5e9", "entry": "#c8e6c9", "text": "#000000"},
+    "rose": {"bg": "#fce4ec", "entry": "#f8bbd0", "text": "#000000"},
+    "lavender": {"bg": "#f3e5f5", "entry": "#e1bee7", "text": "#000000"},
+    "midnight": {"bg": "#121212", "entry": "#1e1e1e", "text": "#ffffff"},
+    "sunset": {"bg": "#3e2723", "entry": "#5d4037", "text": "#ffffff"},
+}
+# --------------------------------------------------
+def safe_eval(eq, **kw):
+    try:
+        return eval(eq, {"__builtins__": {}}, kw)
+    except Exception as e:
+        messagebox.showerror("Equation Error", str(e))
+        return None
+# Helpers ----------------------------------------------------
+def parse_values(s: str):
+    """Accept separators: space, comma, pipe. Return list[float]."""
+    for ch in ["|", ",", "\n", "\t"]:
+        s = s.replace(ch, " ")
+    parts = [p for p in s.split() if p]
+    return list(map(float, parts))
+def count_values(s: str) -> int:
+    try:
+        return len(parse_values(s))
+    except Exception:
+        # If not parsable yet, count tentative tokens (split by separators)
+        for ch in ["|", ",", "\n", "\t"]:
+            s = s.replace(ch, " ")
+        return len([p for p in s.split() if p])
+        
+# Arabic text handling
+def process_arabic_text(text):
+    """Process Arabic text to display correctly"""
+    if not text:
+        return text
+    try:
+        reshaped_text = arabic_reshaper.reshape(text)
+        return get_display(reshaped_text)
+    except:
+        return text
+
+# --------------------------------------------------
+class PDFExportDialog(ctk.CTkToplevel):
+    def __init__(self, parent, records, colors, excel_data=None):
+        super().__init__(parent)
+        self.title("PDF Export Settings")
+        self.geometry("1400x900")  # Larger size
+        self.resizable(True, True)  # Make resizable
+        self.records = records
+        self.colors = colors  # Store the colors
+        self.excel_data = excel_data or []  # Store Excel data
+        self.pdf_settings = settings.get("pdf_settings", {})
+        self.preview_image = None
+        self.preview_photo = None  # For tkinter PhotoImage
+        
+        # Make dialog appear on top
+        self.transient(parent)
+        self.grab_set()
+        
+        # Configure grid weights
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+        
+        # Create main frames
+        self.settings_frame = ctk.CTkFrame(self, fg_color=self.colors["bg"])
+        self.settings_frame.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+        
+        self.preview_frame = ctk.CTkFrame(self, fg_color=self.colors["bg"])
+        self.preview_frame.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
+        
+        self.buttons_frame = ctk.CTkFrame(self, fg_color=self.colors["bg"])
+        self.buttons_frame.grid(row=1, column=0, columnspan=2, padx=10, pady=10, sticky="ew")
+        
+        # Create notebook for settings tabs
+        self.notebook = ctk.CTkTabview(self.settings_frame, fg_color=self.colors["bg"])
+        self.notebook.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        # Create tabs
+        self.notebook.add("Basic")
+        self.notebook.add("Advanced")
+        self.notebook.add("Layout")
+        self.notebook.add("Styling")
+        self.notebook.add("Interface")
+        
+        # Build tab contents
+        self.create_basic_tab()
+        self.create_advanced_tab()
+        self.create_layout_tab()
+        self.create_styling_tab()
+        self.create_interface_tab()
+        
+        self.create_preview_ui()
+        self.create_buttons()
+        
+        # Initial preview
+        self.update_preview()
+        
+    def create_basic_tab(self):
+        tab = self.notebook.tab("Basic")
+        tab.configure(fg_color=self.colors["bg"])
+        
+        # Station Name
+        ctk.CTkLabel(tab, text="Station Name:", text_color=self.colors["text"]).grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        self.station_name_var = ctk.StringVar(value=self.pdf_settings.get("station_name", "Ultra-Pipe Inspection"))
+        self.station_name_entry = ctk.CTkEntry(tab, textvariable=self.station_name_var, width=200, 
+                                              fg_color=self.colors["entry"], text_color=self.colors["text"])
+        self.station_name_entry.grid(row=0, column=1, sticky="ew", padx=5, pady=5)
+        self.station_name_entry.bind("<KeyRelease>", lambda e: self.update_preview())
+        
+        # Spacing
+        ctk.CTkLabel(tab, text="Spacing (1-4):", text_color=self.colors["text"]).grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        self.spacing_var = ctk.IntVar(value=self.pdf_settings.get("spacing", 2))
+        self.spacing_slider = ctk.CTkSlider(tab, from_=1, to=4, variable=self.spacing_var, 
+                                          number_of_steps=3, width=200)
+        self.spacing_slider.grid(row=1, column=1, sticky="ew", padx=5, pady=5)
+        self.spacing_slider.bind("<ButtonRelease-1>", lambda e: self.update_preview())
+        
+        # Font Family
+        ctk.CTkLabel(tab, text="Font Family:", text_color=self.colors["text"]).grid(row=2, column=0, sticky="w", padx=5, pady=5)
+        self.font_family_var = ctk.StringVar(value=self.pdf_settings.get("font_family", "Arial"))
+        self.font_family_combo = ctk.CTkComboBox(tab, variable=self.font_family_var, 
+                                                values=["Arial", "Times New Roman", "Courier New", "Helvetica"],
+                                                width=200, fg_color=self.colors["entry"], text_color=self.colors["text"])
+        self.font_family_combo.grid(row=2, column=1, sticky="ew", padx=5, pady=5)
+        self.font_family_combo.bind("<<ComboboxSelected>>", lambda e: self.update_preview())
+        
+        # Font Size
+        ctk.CTkLabel(tab, text="Font Size:", text_color=self.colors["text"]).grid(row=3, column=0, sticky="w", padx=5, pady=5)
+        self.font_size_var = ctk.IntVar(value=self.pdf_settings.get("font_size", 10))
+        self.font_size_slider = ctk.CTkSlider(tab, from_=8, to=16, variable=self.font_size_var, 
+                                            number_of_steps=8, width=200)
+        self.font_size_slider.grid(row=3, column=1, sticky="ew", padx=5, pady=5)
+        self.font_size_slider.bind("<ButtonRelease-1>", lambda e: self.update_preview())
+        
+        # Watermark
+        ctk.CTkLabel(tab, text="Watermark Image:", text_color=self.colors["text"]).grid(row=4, column=0, sticky="w", padx=5, pady=5)
+        self.watermark_frame = ctk.CTkFrame(tab, fg_color=self.colors["bg"])
+        self.watermark_frame.grid(row=4, column=1, sticky="ew", padx=5, pady=5)
+        
+        self.watermark_path_var = ctk.StringVar(value=self.pdf_settings.get("watermark_path", ""))
+        self.watermark_path_entry = ctk.CTkEntry(self.watermark_frame, textvariable=self.watermark_path_var, width=150,
+                                                 fg_color=self.colors["entry"], text_color=self.colors["text"])
+        self.watermark_path_entry.pack(side="left", padx=5)
+        
+        self.watermark_browse_btn = ctk.CTkButton(self.watermark_frame, text="Browse", width=60, 
+                                                 command=self.browse_watermark)
+        self.watermark_browse_btn.pack(side="left", padx=5)
+        
+        self.watermark_clear_btn = ctk.CTkButton(self.watermark_frame, text="Clear", width=60, 
+                                                command=self.clear_watermark)
+        self.watermark_clear_btn.pack(side="left", padx=5)
+        
+        # Watermark Size
+        ctk.CTkLabel(tab, text="Watermark Size (%):", text_color=self.colors["text"]).grid(row=5, column=0, sticky="w", padx=5, pady=5)
+        self.watermark_size_var = ctk.IntVar(value=self.pdf_settings.get("watermark_size", 30))
+        self.watermark_size_slider = ctk.CTkSlider(tab, from_=10, to=100, variable=self.watermark_size_var, 
+                                                  width=200)
+        self.watermark_size_slider.grid(row=5, column=1, sticky="ew", padx=5, pady=5)
+        self.watermark_size_slider.bind("<ButtonRelease-1>", lambda e: self.update_preview())
+        
+        # Watermark Opacity
+        ctk.CTkLabel(tab, text="Watermark Opacity:", text_color=self.colors["text"]).grid(row=6, column=0, sticky="w", padx=5, pady=5)
+        self.watermark_opacity_var = ctk.DoubleVar(value=self.pdf_settings.get("watermark_opacity", 0.2))
+        self.watermark_opacity_slider = ctk.CTkSlider(tab, from_=0.1, to=1.0, variable=self.watermark_opacity_var, 
+                                                     width=200)
+        self.watermark_opacity_slider.grid(row=6, column=1, sticky="ew", padx=5, pady=5)
+        self.watermark_opacity_slider.bind("<ButtonRelease-1>", lambda e: self.update_preview())
+        
+        # Configure column weight
+        tab.grid_columnconfigure(1, weight=1)
+        
+    def create_advanced_tab(self):
+        tab = self.notebook.tab("Advanced")
+        tab.configure(fg_color=self.colors["bg"])
+        
+        # Page Orientation
+        ctk.CTkLabel(tab, text="Page Orientation:", text_color=self.colors["text"]).grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        self.orientation_var = ctk.StringVar(value=self.pdf_settings.get("page_orientation", "portrait"))
+        orientation_frame = ctk.CTkFrame(tab, fg_color=self.colors["bg"])
+        orientation_frame.grid(row=0, column=1, sticky="w", padx=5, pady=5)
+        
+        ctk.CTkRadioButton(orientation_frame, text="Portrait", variable=self.orientation_var, 
+                          value="portrait").pack(side="left", padx=5)
+        ctk.CTkRadioButton(orientation_frame, text="Landscape", variable=self.orientation_var, 
+                          value="landscape").pack(side="left", padx=5)
+        
+        # Margins
+        ctk.CTkLabel(tab, text="Margins (cm):", text_color=self.colors["text"]).grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        margins_frame = ctk.CTkFrame(tab, fg_color=self.colors["bg"])
+        margins_frame.grid(row=1, column=1, sticky="ew", padx=5, pady=5)
+        
+        # Top margin
+        ctk.CTkLabel(margins_frame, text="Top:", text_color=self.colors["text"]).grid(row=0, column=0, padx=2)
+        self.margin_top_var = ctk.DoubleVar(value=self.pdf_settings.get("margin_top", 1.0))
+        ctk.CTkEntry(margins_frame, textvariable=self.margin_top_var, width=50,
+                    fg_color=self.colors["entry"], text_color=self.colors["text"]).grid(row=0, column=1, padx=2)
+        
+        # Bottom margin
+        ctk.CTkLabel(margins_frame, text="Bottom:", text_color=self.colors["text"]).grid(row=0, column=2, padx=2)
+        self.margin_bottom_var = ctk.DoubleVar(value=self.pdf_settings.get("margin_bottom", 1.0))
+        ctk.CTkEntry(margins_frame, textvariable=self.margin_bottom_var, width=50,
+                    fg_color=self.colors["entry"], text_color=self.colors["text"]).grid(row=0, column=3, padx=2)
+        
+        # Left margin
+        ctk.CTkLabel(margins_frame, text="Left:", text_color=self.colors["text"]).grid(row=1, column=0, padx=2)
+        self.margin_left_var = ctk.DoubleVar(value=self.pdf_settings.get("margin_left", 1.0))
+        ctk.CTkEntry(margins_frame, textvariable=self.margin_left_var, width=50,
+                    fg_color=self.colors["entry"], text_color=self.colors["text"]).grid(row=1, column=1, padx=2)
+        
+        # Right margin
+        ctk.CTkLabel(margins_frame, text="Right:", text_color=self.colors["text"]).grid(row=1, column=2, padx=2)
+        self.margin_right_var = ctk.DoubleVar(value=self.pdf_settings.get("margin_right", 1.0))
+        ctk.CTkEntry(margins_frame, textvariable=self.margin_right_var, width=50,
+                    fg_color=self.colors["entry"], text_color=self.colors["text"]).grid(row=1, column=3, padx=2)
+        
+        # Configure column weight
+        tab.grid_columnconfigure(1, weight=1)
+        
+    def create_layout_tab(self):
+        tab = self.notebook.tab("Layout")
+        tab.configure(fg_color=self.colors["bg"])
+        
+        # Include Interface
+        self.include_interface_var = ctk.BooleanVar(value=self.pdf_settings.get("include_interface", True))
+        ctk.CTkCheckBox(tab, text="Include Interface Screenshot", variable=self.include_interface_var,
+                       text_color=self.colors["text"]).grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        
+        # Interface Title
+        ctk.CTkLabel(tab, text="Interface Title:", text_color=self.colors["text"]).grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        self.interface_title_var = ctk.StringVar(value=self.pdf_settings.get("interface_title", "Interface Screenshot"))
+        self.interface_title_entry = ctk.CTkEntry(tab, textvariable=self.interface_title_var, width=200,
+                                                fg_color=self.colors["entry"], text_color=self.colors["text"])
+        self.interface_title_entry.grid(row=1, column=1, sticky="ew", padx=5, pady=5)
+        
+        # Include Notes at End
+        self.include_notes_at_end_var = ctk.BooleanVar(value=self.pdf_settings.get("include_notes_at_end", True))
+        ctk.CTkCheckBox(tab, text="Include Notes at End of Report", variable=self.include_notes_at_end_var,
+                       text_color=self.colors["text"]).grid(row=2, column=0, sticky="w", padx=5, pady=5)
+        
+        # Notes Title
+        ctk.CTkLabel(tab, text="Notes Section Title:", text_color=self.colors["text"]).grid(row=3, column=0, sticky="w", padx=5, pady=5)
+        self.notes_title_var = ctk.StringVar(value=self.pdf_settings.get("notes_title", "Notes and Images"))
+        self.notes_title_entry = ctk.CTkEntry(tab, textvariable=self.notes_title_var, width=200,
+                                             fg_color=self.colors["entry"], text_color=self.colors["text"])
+        self.notes_title_entry.grid(row=3, column=1, sticky="ew", padx=5, pady=5)
+        
+        # Configure column weight
+        tab.grid_columnconfigure(1, weight=1)
+        
+    def create_styling_tab(self):
+        tab = self.notebook.tab("Styling")
+        tab.configure(fg_color=self.colors["bg"])
+        
+        # Header Font Size
+        ctk.CTkLabel(tab, text="Header Font Size:", text_color=self.colors["text"]).grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        self.header_font_size_var = ctk.IntVar(value=self.pdf_settings.get("header_font_size", 14))
+        self.header_font_size_slider = ctk.CTkSlider(tab, from_=10, to=20, variable=self.header_font_size_var, 
+                                                   number_of_steps=10, width=200)
+        self.header_font_size_slider.grid(row=0, column=1, sticky="ew", padx=5, pady=5)
+        
+        # Table Font Size
+        ctk.CTkLabel(tab, text="Table Font Size:", text_color=self.colors["text"]).grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        self.table_font_size_var = ctk.IntVar(value=self.pdf_settings.get("table_font_size", 10))
+        self.table_font_size_slider = ctk.CTkSlider(tab, from_=8, to=16, variable=self.table_font_size_var, 
+                                                  number_of_steps=8, width=200)
+        self.table_font_size_slider.grid(row=1, column=1, sticky="ew", padx=5, pady=5)
+        
+        # Notes Font Size
+        ctk.CTkLabel(tab, text="Notes Font Size:", text_color=self.colors["text"]).grid(row=2, column=0, sticky="w", padx=5, pady=5)
+        self.notes_font_size_var = ctk.IntVar(value=self.pdf_settings.get("notes_font_size", 10))
+        self.notes_font_size_slider = ctk.CTkSlider(tab, from_=8, to=16, variable=self.notes_font_size_var, 
+                                                   number_of_steps=8, width=200)
+        self.notes_font_size_slider.grid(row=2, column=1, sticky="ew", padx=5, pady=5)
+        
+        # Table Border Color
+        ctk.CTkLabel(tab, text="Table Border Color:", text_color=self.colors["text"]).grid(row=3, column=0, sticky="w", padx=5, pady=5)
+        self.table_border_color_var = ctk.StringVar(value=self.pdf_settings.get("table_border_color", "#000000"))
+        self.table_border_color_entry = ctk.CTkEntry(tab, textvariable=self.table_border_color_var, width=100,
+                                                     fg_color=self.colors["entry"], text_color=self.colors["text"])
+        self.table_border_color_entry.grid(row=3, column=1, sticky="w", padx=5, pady=5)
+        
+        # Table Header Color
+        ctk.CTkLabel(tab, text="Table Header Color:", text_color=self.colors["text"]).grid(row=4, column=0, sticky="w", padx=5, pady=5)
+        self.table_header_color_var = ctk.StringVar(value=self.pdf_settings.get("table_header_color", "#cccccc"))
+        self.table_header_color_entry = ctk.CTkEntry(tab, textvariable=self.table_header_color_var, width=100,
+                                                     fg_color=self.colors["entry"], text_color=self.colors["text"])
+        self.table_header_color_entry.grid(row=4, column=1, sticky="w", padx=5, pady=5)
+        
+        # Table Row Color
+        ctk.CTkLabel(tab, text="Table Row Color:", text_color=self.colors["text"]).grid(row=5, column=0, sticky="w", padx=5, pady=5)
+        self.table_row_color_var = ctk.StringVar(value=self.pdf_settings.get("table_row_color", "#f0f0f0"))
+        self.table_row_color_entry = ctk.CTkEntry(tab, textvariable=self.table_row_color_var, width=100,
+                                                  fg_color=self.colors["entry"], text_color=self.colors["text"])
+        self.table_row_color_entry.grid(row=5, column=1, sticky="w", padx=5, pady=5)
+        
+        # Configure column weight
+        tab.grid_columnconfigure(1, weight=1)
+        
+    def create_interface_tab(self):
+        tab = self.notebook.tab("Interface")
+        tab.configure(fg_color=self.colors["bg"])
+        
+        # Interface Customization
+        ctk.CTkLabel(tab, text="Interface Customization", text_color=self.colors["text"],
+                    font=ctk.CTkFont(size=16, weight="bold")).grid(row=0, column=0, columnspan=2, pady=10)
+        
+        # Background Color
+        ctk.CTkLabel(tab, text="Background Color:", text_color=self.colors["text"]).grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        self.bg_color_var = ctk.StringVar(value=self.colors["bg"])
+        bg_color_frame = ctk.CTkFrame(tab, fg_color=self.colors["bg"])
+        bg_color_frame.grid(row=1, column=1, sticky="ew", padx=5, pady=5)
+        
+        for color_name, color_value in THEMES.items():
+            ctk.CTkRadioButton(bg_color_frame, text=color_name, variable=self.bg_color_var, 
+                              value=color_value).pack(side="left", padx=5)
+        
+        # Text Color
+        ctk.CTkLabel(tab, text="Text Color:", text_color=self.colors["text"]).grid(row=2, column=0, sticky="w", padx=5, pady=5)
+        self.text_color_var = ctk.StringVar(value=self.colors["text"])
+        text_color_frame = ctk.CTkFrame(tab, fg_color=self.colors["bg"])
+        text_color_frame.grid(row=2, column=1, sticky="ew", padx=5, pady=5)
+        
+        ctk.CTkRadioButton(text_color_frame, text="Light", variable=self.text_color_var, 
+                         value="#000000").pack(side="left", padx=5)
+        ctk.CTkRadioButton(text_color_frame, text="Dark", variable=self.text_color_var, 
+                         value="#ffffff").pack(side="left", padx=5)
+        
+        # Entry Color
+        ctk.CTkLabel(tab, text="Entry Color:", text_color=self.colors["text"]).grid(row=3, column=0, sticky="w", padx=5, pady=5)
+        self.entry_color_var = ctk.StringVar(value=self.colors["entry"])
+        entry_color_frame = ctk.CTkFrame(tab, fg_color=self.colors["bg"])
+        entry_color_frame.grid(row=3, column=1, sticky="ew", padx=5, pady=5)
+        
+        ctk.CTkRadioButton(entry_color_frame, text="Light", variable=self.entry_color_var, 
+                         value="#ffffff").pack(side="left", padx=5)
+        ctk.CTkRadioButton(entry_color_frame, text="Dark", variable=self.entry_color_var, 
+                         value="#2b2b2b").pack(side="left", padx=5)
+        ctk.CTkRadioButton(entry_color_frame, text="Medium", variable=self.entry_color_var, 
+                         value="#3f3f3f").pack(side="left", padx=5)
+        
+        # Apply Button
+        apply_btn = ctk.CTkButton(tab, text="Apply Interface Settings", command=self.apply_interface_settings)
+        apply_btn.grid(row=4, column=0, columnspan=2, pady=10)
+        
+        # Configure column weight
+        tab.grid_columnconfigure(1, weight=1)
+        
+    def apply_interface_settings(self):
+        # Get the selected colors
+        bg_color = self.bg_color_var.get()
+        text_color = self.text_color_var.get()
+        entry_color = self.entry_color_var.get()
+        
+        # Update the theme
+        for theme_name, theme_values in THEMES.items():
+            if theme_values["bg"] == bg_color:
+                settings["theme"] = theme_name
+                break
+        
+        # Update the interface colors
+        self.colors["bg"] = bg_color
+        self.colors["text"] = text_color
+        self.colors["entry"] = entry_color
+        
+        # Save settings
+        save_json(SETTINGS_FILE, settings)
+        
+        # Update the dialog
+        self.configure(fg_color=self.colors["bg"])
+        self.settings_frame.configure(fg_color=self.colors["bg"])
+        self.preview_frame.configure(fg_color=self.colors["bg"])
+        self.buttons_frame.configure(fg_color=self.colors["bg"])
+        self.notebook.configure(fg_color=self.colors["bg"])
+        
+        # Update all tabs
+        for tab_name in ["Basic", "Advanced", "Layout", "Styling", "Interface"]:
+            tab = self.notebook.tab(tab_name)
+            tab.configure(fg_color=self.colors["bg"])
+        
+        # Update all widgets in the dialog
+        for widget in self.winfo_children():
+            self.update_widget_colors(widget)
+        
+        # Update preview
+        self.update_preview()
+        
+        messagebox.showinfo("Interface Settings", "Interface settings applied successfully. Restart the application for full effect.")
+        
+    def update_widget_colors(self, widget):
+        # Recursively update widget colors
+        try:
+            if isinstance(widget, (ctk.CTkLabel, ctk.CTkButton, ctk.CTkCheckBox, ctk.CTkRadioButton)):
+                widget.configure(text_color=self.colors["text"])
+            elif isinstance(widget, (ctk.CTkEntry, ctk.CTkComboBox, ctk.CTkTextbox, ctk.CTkSlider)):
+                widget.configure(fg_color=self.colors["entry"], text_color=self.colors["text"])
+            elif isinstance(widget, (ctk.CTkFrame, ctk.CTkTabview)):
+                widget.configure(fg_color=self.colors["bg"])
+                
+            # Recursively update children
+            for child in widget.winfo_children():
+                self.update_widget_colors(child)
+        except:
+            pass
+        
+    def create_preview_ui(self):
+        # Title
+        ctk.CTkLabel(self.preview_frame, text="Preview", 
+                    font=ctk.CTkFont(size=16, weight="bold"),
+                    text_color=self.colors["text"]).pack(pady=10)
+        
+        # Preview canvas
+        self.preview_canvas = tk.Canvas(self.preview_frame, width=600, height=700, bg="white")
+        self.preview_canvas.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        # Configure grid weights
+        self.preview_frame.pack_propagate(False)
+        
+    def create_buttons(self):
+        # Export button
+        self.export_btn = ctk.CTkButton(self.buttons_frame, text="Export PDF", command=self.export_pdf)
+        self.export_btn.pack(side="left", padx=10, pady=10)
+        
+        # Cancel button
+        self.cancel_btn = ctk.CTkButton(self.buttons_frame, text="Cancel", command=self.destroy)
+        self.cancel_btn.pack(side="right", padx=10, pady=10)
+        
+    def browse_watermark(self):
+        path = filedialog.askopenfilename(filetypes=[("Images", "*.png *.jpg *.jpeg")])
+        if path:
+            self.watermark_path_var.set(path)
+            self.update_preview()
+            
+    def clear_watermark(self):
+        self.watermark_path_var.set("")
+        self.update_preview()
+        
+    def update_preview(self):
+        # Clear canvas
+        self.preview_canvas.delete("all")
+        
+        # Create a temporary image to simulate the PDF preview
+        width, height = 600, 700
+        preview_img = Image.new('RGB', (width, height), color='white')
+        draw = ImageDraw.Draw(preview_img)
+        
+        # Try to load a font
+        try:
+            font_size = self.font_size_var.get()
+            font_family = self.font_family_var.get()
+            
+            if font_family == "Arial":
+                font = ImageFont.truetype("arial.ttf", font_size)
+            elif font_family == "Times New Roman":
+                font = ImageFont.truetype("times.ttf", font_size)
+            else:
+                font = ImageFont.load_default()
+        except:
+            font = ImageFont.load_default()
+            
+        # Draw title
+        station_name = self.station_name_var.get()
+        title = process_arabic_text(station_name)
+        draw.text((width//2, 20), title, fill='black', font=font, anchor="mt")
+        
+        # Draw sample table
+        y_pos = 60
+        spacing = self.spacing_var.get() * 5
+        
+        # Sample headers
+        headers = ["Point", "COth (mm)", "THme (mm)", "RTV (mm)"]
+        x_pos = 20
+        header_font = ImageFont.truetype("arialbd.ttf" if os.path.exists("arialbd.ttf") else "arial.ttf", font_size)
+        
+        for header in headers:
+            draw.text((x_pos, y_pos), header, fill='black', font=header_font)
+            x_pos += 120
+            
+        y_pos += spacing + 10
+        
+        # Sample data
+        for i in range(8):
+            x_pos = 20
+            for j in range(4):
+                value = f"{i+1}.{j+1}"
+                draw.text((x_pos, y_pos), value, fill='black', font=font)
+                x_pos += 120
+            y_pos += spacing
+            
+        # Draw watermark if exists
+        watermark_path = self.watermark_path_var.get()
+        if watermark_path and os.path.exists(watermark_path):
+            try:
+                watermark = Image.open(watermark_path)
+                watermark_size = int(width * (self.watermark_size_var.get() / 100))
+                watermark = watermark.resize((watermark_size, watermark_size))
+                
+                # Apply opacity
+                opacity = int(self.watermark_opacity_var.get() * 255)
+                watermark.putalpha(opacity)
+                
+                # Position watermark in center
+                x = (width - watermark_size) // 2
+                y = (height - watermark_size) // 2
+                preview_img.paste(watermark, (x, y), watermark)
+            except Exception as e:
+                print(f"Watermark error: {e}")
+                
+        # Save to temporary file and create PhotoImage
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            temp_path = tmp.name
+            preview_img.save(temp_path)
+            
+        # Create PhotoImage from temporary file
+        self.preview_photo = ImageTk.PhotoImage(file=temp_path)
+        self.preview_canvas.create_image(width//2, height//2, image=self.preview_photo)
+        
+        # Keep a reference to the temporary file to prevent garbage collection
+        self.temp_path = temp_path
+        
+    def export_pdf(self):
+        # Save settings
+        settings["pdf_settings"] = {
+            "station_name": self.station_name_var.get(),
+            "spacing": self.spacing_var.get(),
+            "font_family": self.font_family_var.get(),
+            "font_size": self.font_size_var.get(),
+            "watermark_path": self.watermark_path_var.get(),
+            "watermark_size": self.watermark_size_var.get(),
+            "watermark_opacity": self.watermark_opacity_var.get(),
+            "page_orientation": self.orientation_var.get(),
+            "margin_top": self.margin_top_var.get(),
+            "margin_bottom": self.margin_bottom_var.get(),
+            "margin_left": self.margin_left_var.get(),
+            "margin_right": self.margin_right_var.get(),
+            "include_interface": self.include_interface_var.get(),
+            "include_notes_at_end": self.include_notes_at_end_var.get(),
+            "interface_title": self.interface_title_var.get(),
+            "notes_title": self.notes_title_var.get(),
+            "header_font_size": self.header_font_size_var.get(),
+            "table_font_size": self.table_font_size_var.get(),
+            "notes_font_size": self.notes_font_size_var.get(),
+            "table_border_color": self.table_border_color_var.get(),
+            "table_header_color": self.table_header_color_var.get(),
+            "table_row_color": self.table_row_color_var.get(),
+        }
+        save_json(SETTINGS_FILE, settings)
+        
+        # Get export path
+        path = filedialog.asksaveasfilename(
+            defaultextension=".pdf", 
+            filetypes=[("PDF files", "*.pdf")],
+            initialfile=f"{self.station_name_var.get().replace(' ', '_')}_Report.pdf"
+        )
+        
+        if not path:
+            return
+            
+        # Create PDF
+        self.create_pdf(path)
+        
+        messagebox.showinfo("Export", "PDF exported successfully.")
+        self.destroy()
+        
+    def create_pdf(self, path):
+        # Get settings
+        station_name = self.station_name_var.get()
+        spacing = self.spacing_var.get()
+        font_family = self.font_family_var.get()
+        font_size = self.font_size_var.get()
+        watermark_path = self.watermark_path_var.get()
+        watermark_size = self.watermark_size_var.get() / 100
+        watermark_opacity = self.watermark_opacity_var.get()
+        orientation = self.orientation_var.get()
+        margin_top = self.margin_top_var.get()
+        margin_bottom = self.margin_bottom_var.get()
+        margin_left = self.margin_left_var.get()
+        margin_right = self.margin_right_var.get()
+        include_interface = self.include_interface_var.get()
+        include_notes_at_end = self.include_notes_at_end_var.get()
+        interface_title = self.interface_title_var.get()
+        notes_title = self.notes_title_var.get()
+        header_font_size = self.header_font_size_var.get()
+        table_font_size = self.table_font_size_var.get()
+        notes_font_size = self.notes_font_size_var.get()
+        table_border_color = self.table_border_color_var.get()
+        table_header_color = self.table_header_color_var.get()
+        table_row_color = self.table_row_color_var.get()
+        
+        # Set page size based on orientation
+        if orientation == "landscape":
+            page_size = (A4[1], A4[0])  # Swap width and height for landscape
+        else:
+            page_size = A4
+            
+        # Create PDF document
+        doc = SimpleDocTemplate(
+            path,
+            pagesize=page_size,
+            leftMargin=margin_left * cm,
+            rightMargin=margin_right * cm,
+            topMargin=margin_top * cm,
+            bottomMargin=margin_bottom * cm
+        )
+        
+        # Set up fonts
+        try:
+            if font_family == "Arial":
+                regular_font = "Arial"
+                bold_font = "Arial-Bold"
+            elif font_family == "Times New Roman":
+                regular_font = "TimesNewRoman"
+                bold_font = "TimesNewRoman-Bold"
+            else:
+                regular_font = "Helvetica"
+                bold_font = "Helvetica-Bold"
+        except:
+            regular_font = "Helvetica"
+            bold_font = "Helvetica-Bold"
+            
+        # Create styles
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Heading1'],
+            fontName=bold_font,
+            fontSize=header_font_size,
+            alignment=TA_CENTER,
+            spaceAfter=20
+        )
+        
+        heading_style = ParagraphStyle(
+            'CustomHeading',
+            parent=styles['Heading2'],
+            fontName=bold_font,
+            fontSize=header_font_size - 2,
+            spaceAfter=12
+        )
+        
+        normal_style = ParagraphStyle(
+            'CustomNormal',
+            parent=styles['Normal'],
+            fontName=regular_font,
+            fontSize=table_font_size,
+            spaceAfter=6
+        )
+        
+        notes_style = ParagraphStyle(
+            'CustomNotes',
+            parent=styles['Normal'],
+            fontName=regular_font,
+            fontSize=notes_font_size,
+            spaceAfter=6
+        )
+        
+        # Build document elements
+        elements = []
+        
+        # Add title
+        title_text = process_arabic_text(station_name)
+        elements.append(Paragraph(title_text, title_style))
+        
+        # Add date
+        date_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        date_para = Paragraph(f"<para alignment=right>{date_str}</para>", normal_style)
+        elements.append(date_para)
+        
+        # Include interface screenshot if requested
+        if include_interface:
+            elements.append(PageBreak())
+            elements.append(Paragraph(process_arabic_text(interface_title), heading_style))
+            
+            # Capture the interface
+            try:
+                # Get the root window
+                root = self.master
+                x = root.winfo_rootx()
+                y = root.winfo_rooty()
+                width1 = root.winfo_width()
+                height1 = root.winfo_height()
+                
+                # Create a temporary file for the screenshot
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                    temp_path = tmp.name
+                
+                # Take screenshot using PIL
+                import PIL.ImageGrab as ImageGrab
+                screenshot = ImageGrab.grab(bbox=(x, y, x + width1, y + height1))
+                screenshot.save(temp_path)
+                
+                # Add image to document
+                img = RLImage(temp_path, width=15*cm, height=10*cm)
+                elements.append(img)
+                
+                # Clean up temporary file
+                os.unlink(temp_path)
+            except Exception as e:
+                print(f"Interface screenshot error: {e}")
+                elements.append(Paragraph("Interface screenshot not available", normal_style))
+        
+        # Add Excel data if available
+        if self.excel_data:
+            elements.append(PageBreak())
+            elements.append(Paragraph("Excel Data", heading_style))
+            
+            for record in self.excel_data:
+                # Create part header
+                part_text = process_arabic_text(f"Part: {record['part_name']}")
+                elements.append(Paragraph(part_text, heading_style))
+                
+                # Add diameter
+                if record.get('diameter'):
+                    dia_text = f"Diameter: {record['diameter']} mm"
+                    elements.append(Paragraph(dia_text, normal_style))
+                
+                # Draw table
+                headers = record['headers']
+                data = record['data']
+                
+                # Prepare table data
+                table_data = [headers]
+                table_data.extend(data)
+                
+                # Create table
+                table = Table(table_data)
+                
+                # Style table
+                style = TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), HexColor(table_header_color)),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                    ('FONTNAME', (0, 0), (-1, 0), bold_font),
+                    ('FONTSIZE', (0, 0), (-1, 0), table_font_size),
+                    ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                    ('BACKGROUND', (0, 1), (-1, -1), HexColor(table_row_color)),
+                    ('FONTNAME', (0, 1), (-1, -1), regular_font),
+                    ('FONTSIZE', (0, 1), (-1, -1), table_font_size),
+                    ('GRID', (0, 0), (-1, -1), 1, HexColor(table_border_color))
+                ])
+                table.setStyle(style)
+                
+                elements.append(table)
+                elements.append(Paragraph("<br/><br/>", normal_style))
+        
+        # Process each record
+        notes_and_images = []
+        
+        for rec in self.records:
+            # Get part info
+            part_name = rec["meta"].get("part_name", "-")
+            diameter = rec["meta"].get("diameter", "-") or "-"
+            notes = rec["meta"].get("notes", "")
+            photo_path = rec["meta"].get("photo", "")
+            
+            # Store notes and images for later if requested
+            if include_notes_at_end and (notes or photo_path):
+                notes_and_images.append({
+                    "part_name": part_name,
+                    "notes": notes,
+                    "photo_path": photo_path
+                })
+            
+            # Create part header
+            part_text = process_arabic_text(f"Part: {part_name}")
+            elements.append(Paragraph(part_text, heading_style))
+            
+            # Add diameter
+            dia_text = f"Diameter: {diameter} mm"
+            elements.append(Paragraph(dia_text, normal_style))
+            
+            # Add date/time
+            date_text = rec["meta"].get("datetime", "")
+            elements.append(Paragraph(f"<para alignment=right>{date_text}</para>", normal_style))
+            
+            # Draw table
+            headers = rec["headers"]
+            data = rec["data"]
+            
+            # Prepare table data
+            table_data = [headers]
+            table_data.extend(data)
+            
+            # Create table
+            table = Table(table_data)
+            
+            # Style table
+            style = TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), HexColor(table_header_color)),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, 0), bold_font),
+                ('FONTSIZE', (0, 0), (-1, 0), table_font_size),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), HexColor(table_row_color)),
+                ('FONTNAME', (0, 1), (-1, -1), regular_font),
+                ('FONTSIZE', (0, 1), (-1, -1), table_font_size),
+                ('GRID', (0, 0), (-1, -1), 1, HexColor(table_border_color))
+            ])
+            table.setStyle(style)
+            
+            elements.append(table)
+            elements.append(Paragraph("<br/><br/>", normal_style))
+        
+        # Add notes and images at the end if requested
+        if include_notes_at_end and notes_and_images:
+            elements.append(PageBreak())
+            elements.append(Paragraph(process_arabic_text(notes_title), title_style))
+            
+            for item in notes_and_images:
+                # Draw part name
+                part_text = process_arabic_text(f"Part: {item['part_name']}")
+                elements.append(Paragraph(part_text, heading_style))
+                
+                # Draw notes if available
+                if item['notes']:
+                    notes_text = item['notes']
+                    elements.append(Paragraph(notes_text, notes_style))
+                
+                # Draw image if available
+                if item['photo_path'] and os.path.exists(item['photo_path']):
+                    try:
+                        # Add image to document
+                        img = RLImage(item['photo_path'], width=10*cm, height=7*cm)
+                        elements.append(img)
+                    except Exception as e:
+                        print(f"Image error: {e}")
+                        elements.append(Paragraph("Image not available", notes_style))
+                
+                elements.append(Paragraph("<br/><br/>", notes_style))
+        
+        # Build PDF
+        doc.build(elements)
+
+# --------------------------------------------------
+class App(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title("Ultra-Pipe Inspection – Giant")
+        self.geometry("1180x780")
+        self.resizable(False, False)
+        self.colors = THEMES[settings["theme"]]
+        self.memory = load_json(MEMORY_FILE, {})
+        self.records = list(self.memory.values())[-500:]
+        self.current_session_records = []  # Store records from current session
+        self.setup_vars()
+        self.build_ui()
+        
+    def setup_vars(self):
+        self.part_name  = tk.StringVar()
+        self.diameter   = tk.StringVar()
+        self.coth_vals  = tk.StringVar()
+        self.thme_vals  = tk.StringVar()
+        self.old_vals   = tk.StringVar()
+        self.old_check  = tk.BooleanVar()
+        self.excel_path = tk.StringVar(value=settings.get("last_excel", ""))
+        self.photo_path = tk.StringVar()
+        
+    # ---------- UI ----------
+    def build_ui(self):
+        main = ctk.CTkFrame(self, fg_color=self.colors["bg"])  # whole window
+        main.pack(fill="both", expand=True, padx=8, pady=8)
+        
+        # LEFT panel (inputs)
+        left = ctk.CTkFrame(main, fg_color=self.colors["bg"], width=440)
+        left.pack(side="left", fill="y")
+        left.pack_propagate(False)
+        self.build_left(left)
+        
+        # RIGHT panel: split into center (tabs) + side (Extra)
+        right = ctk.CTkFrame(main, fg_color=self.colors["bg"])  # container
+        right.pack(side="left", fill="both", expand=True, padx=(8, 0))
+        
+        center = ctk.CTkFrame(right, fg_color=self.colors["bg"])  # tabs area (smaller)
+        center.pack(side="left", fill="both", expand=True)
+        
+        sidebar = ctk.CTkFrame(right, fg_color=self.colors["bg"], width=220)  # EXTRA on the right
+        sidebar.pack(side="left", fill="y", padx=(8, 0))
+        sidebar.pack_propagate(False)
+        
+        self.build_right(center, sidebar)
+        
+    def build_left(self, parent):
+        # Part Name
+        ctk.CTkLabel(parent, text="Part Name *", text_color=self.colors["text"]).pack(anchor="w", padx=10, pady=(10, 0))
+        self.part_entry = ctk.CTkEntry(parent, textvariable=self.part_name, placeholder_text="Pipe-001", fg_color=self.colors["entry"], text_color=self.colors["text"])
+        self.part_entry.pack(fill="x", padx=10)
+        
+        # Diameter
+        ctk.CTkLabel(parent, text="Diameter (mm)", text_color=self.colors["text"]).pack(anchor="w", padx=10, pady=(5, 0))
+        self.dia_entry = ctk.CTkEntry(parent, textvariable=self.diameter, placeholder_text="219", fg_color=self.colors["entry"], text_color=self.colors["text"])
+        self.dia_entry.pack(fill="x", padx=10)
+        
+        # COth
+        ctk.CTkLabel(parent, text="COth values (space) *", text_color=self.colors["text"]).pack(anchor="w", padx=10, pady=(5, 0))
+        self.coth_entry = ctk.CTkEntry(parent, textvariable=self.coth_vals, fg_color=self.colors["entry"], text_color=self.colors["text"])  
+        self.coth_entry.pack(fill="x", padx=10)
+        self.coth_lbl = ctk.CTkLabel(parent, text="Count: 0", text_color=self.colors["text"])  
+        self.coth_lbl.pack()
+        
+        # THme
+        ctk.CTkLabel(parent, text="THme values (space) *", text_color=self.colors["text"]).pack(anchor="w", padx=10, pady=(5, 0))
+        self.thme_entry = ctk.CTkEntry(parent, textvariable=self.thme_vals, fg_color=self.colors["entry"], text_color=self.colors["text"])  
+        self.thme_entry.pack(fill="x", padx=10)
+        self.thme_lbl = ctk.CTkLabel(parent, text="Count: 0", text_color=self.colors["text"])  
+        self.thme_lbl.pack()
+        
+        # Old Thickness
+        ctk.CTkCheckBox(parent, text="Include old thickness", variable=self.old_check, command=self.toggle_old, text_color=self.colors["text"]).pack(pady=5)
+        self.old_entry = ctk.CTkEntry(parent, textvariable=self.old_vals, fg_color=self.colors["entry"], text_color=self.colors["text"])  
+        self.old_entry.pack(fill="x", padx=10)
+        self.old_lbl = ctk.CTkLabel(parent, text="Count: 0", text_color=self.colors["text"])  
+        self.old_lbl.pack()
+        
+        # Notes
+        ctk.CTkLabel(parent, text="Notes / Comments", text_color=self.colors["text"]).pack(anchor="w", padx=10, pady=(5, 0))
+        self.notes = ctk.CTkTextbox(parent, height=150, fg_color=self.colors["entry"], text_color=self.colors["text"])  # Increased height
+        self.notes.pack(fill="x", padx=10)
+        
+        # Photo
+        ctk.CTkLabel(parent, text="Photo (optional)", text_color=self.colors["text"]).pack(anchor="w", padx=10, pady=(5, 0))
+        ctk.CTkButton(parent, text="Browse", command=self.browse_photo).pack(fill="x", padx=10)
+        self.photo_lbl = ctk.CTkLabel(parent, text="No image", text_color=self.colors["text"])  
+        self.photo_lbl.pack()
+        
+        # Buttons
+        btn = ctk.CTkFrame(parent, fg_color=self.colors["bg"])  
+        btn.pack(fill="x", pady=10, padx=10)
+        ctk.CTkButton(btn, text="Calculate & Save (Ctrl+S)", command=self.calculate).pack(fill="x", pady=2)
+        ctk.CTkButton(btn, text="Clear Form", command=self.clear_form).pack(fill="x", pady=2)
+        
+        # Behavior: space -> visual separator " | "
+        for entry in (self.coth_entry, self.thme_entry, self.old_entry):
+            entry.bind("<space>", self._insert_separator)
+            
+        self.toggle_old()
+        self.bind_counts()
+        
+    def build_right(self, center_parent, sidebar_parent):
+        # top bar over center tabs
+        top = ctk.CTkFrame(center_parent, fg_color=self.colors["bg"])  
+        top.pack(fill="x", padx=5, pady=5)
+        ctk.CTkLabel(top, text="Excel File:", text_color=self.colors["text"]).pack(side="left")
+        ctk.CTkLabel(top, textvariable=self.excel_path, width=350, text_color=self.colors["text"]).pack(side="left", padx=5)
+        ctk.CTkButton(top, text="Browse", width=80, command=self.browse_excel).pack(side="right", padx=5)
+        ctk.CTkButton(top, text="Open", width=80, command=self.open_excel).pack(side="right")
+        
+        # notebook (reduced width -> results area smaller as requested)
+        nb = ctk.CTkTabview(center_parent)
+        nb.pack(fill="both", expand=True, padx=5, pady=5)
+        nb.add("Results")
+        nb.add("History")
+        nb.add("Settings")
+        
+        # Results (monospace for correct tabulate alignment)
+        res_tab = nb.tab("Results")
+        font_family = "Courier New" if settings.get("monospace", True) else None
+        self.header_label = ctk.CTkLabel(res_tab, text="", text_color=self.colors["text"], anchor="w")
+        self.header_label.pack(fill="x", padx=6, pady=(6, 0))
+        self.result_text = ctk.CTkTextbox(
+            res_tab,
+            wrap="none",
+            fg_color=self.colors["entry"],
+            text_color=self.colors["text"],
+            font=(font_family, 12) if font_family else None,
+            height=340,  # smaller results area
+        )
+        self.result_text.pack(fill="both", expand=True, padx=6, pady=6)
+        
+        # History
+        h_frame = ctk.CTkFrame(nb.tab("History"), fg_color=self.colors["bg"])  
+        h_frame.pack(fill="both", expand=True)
+        search_frame = ctk.CTkFrame(h_frame, fg_color=self.colors["bg"])  
+        search_frame.pack(fill="x", pady=5)
+        ctk.CTkLabel(search_frame, text="Search:", text_color=self.colors["text"]).pack(side="left")
+        self.search_var = tk.StringVar()
+        ctk.CTkEntry(search_frame, textvariable=self.search_var).pack(side="left", fill="x", expand=True, padx=5)
+        self.search_var.trace_add("write", self.filter_history)
+        self.history_listbox = tk.Listbox(h_frame, width=35, bg=self.colors["entry"], fg=self.colors["text"])  
+        self.history_listbox.pack(side="left", fill="y")
+        self.history_listbox.bind("<<ListboxSelect>>", self.show_history_record)
+        self.history_text = ctk.CTkTextbox(
+            h_frame,
+            wrap="none",
+            fg_color=self.colors["entry"],
+            text_color=self.colors["text"],
+            font=(font_family, 12) if font_family else None,
+        )
+        self.history_text.pack(fill="both", expand=True, padx=(5, 0))
+        
+        # Settings (inside tabs area as requested to be near Results/History)
+        set_tab = nb.tab("Settings")
+        self._build_settings(set_tab)
+        
+        # Sidebar (EXTRA) on the right side
+        ctk.CTkLabel(sidebar_parent, text="Extra", text_color=self.colors["text"], font=("", 14, "bold")).pack(pady=(10, 6))
+        ctk.CTkButton(sidebar_parent, text="Export CSV", command=self.export_csv).pack(fill="x", padx=8, pady=4)
+        ctk.CTkButton(sidebar_parent, text="Export PDF (Ctrl+E)", command=self.export_pdf).pack(fill="x", padx=8, pady=4)
+        ctk.CTkButton(sidebar_parent, text="Open Excel", command=self.open_excel).pack(fill="x", padx=8, pady=4)
+        
+        # Keyboard shortcuts
+        self.bind_all("<Control-s>", lambda e: self.calculate())
+        self.bind_all("<Control-S>", lambda e: self.calculate())
+        self.bind_all("<Control-e>", lambda e: self.export_pdf())
+        self.bind_all("<Control-E>", lambda e: self.export_pdf())
+        
+        self.refresh_history_list()
+        
+    # ---------- settings UI ----------
+    def _build_settings(self, parent):
+        wrap = ctk.CTkFrame(parent, fg_color=self.colors["bg"])  
+        wrap.pack(fill="both", expand=True, padx=8, pady=8)
+        
+        # Equation controls
+        ctk.CTkLabel(wrap, text="RTV equation", text_color=self.colors["text"]).grid(row=0, column=0, sticky="w", pady=2)
+        self.rtv_eq_var = tk.StringVar(value=settings.get("rtv_eq"))
+        ctk.CTkEntry(wrap, textvariable=self.rtv_eq_var, fg_color=self.colors["entry"], text_color=self.colors["text"]).grid(row=0, column=1, sticky="ew", padx=6)
+        
+        ctk.CTkLabel(wrap, text="CR equation", text_color=self.colors["text"]).grid(row=1, column=0, sticky="w", pady=2)
+        self.cr_eq_var = tk.StringVar(value=settings.get("cr_eq"))
+        ctk.CTkEntry(wrap, textvariable=self.cr_eq_var, fg_color=self.colors["entry"], text_color=self.colors["text"]).grid(row=1, column=1, sticky="ew", padx=6)
+        
+        # Theme
+        ctk.CTkLabel(wrap, text="Theme", text_color=self.colors["text"]).grid(row=2, column=0, sticky="w", pady=(8, 2))
+        self.theme_var = tk.StringVar(value=settings.get("theme", "dark-blue"))
+        ctk.CTkOptionMenu(wrap, values=list(THEMES.keys()), variable=self.theme_var).grid(row=2, column=1, sticky="w", padx=6)
+        
+        # Monospace toggle
+        self.mono_var = tk.BooleanVar(value=settings.get("monospace", True))
+        ctk.CTkCheckBox(wrap, text="Use monospace font for tables", variable=self.mono_var, text_color=self.colors["text"]).grid(row=3, column=1, sticky="w", pady=(4, 10))
+        
+        # RTL for Arabic
+        self.rtl_var = tk.BooleanVar(value=settings.get("rtl", True))
+        ctk.CTkCheckBox(wrap, text="Right-to-Left for Arabic text", variable=self.rtl_var, text_color=self.colors["text"]).grid(row=4, column=1, sticky="w", pady=(4, 10))
+        
+        # Save/Exit
+        ctk.CTkButton(wrap, text="Save Settings", command=self._save_settings).grid(row=5, column=0, columnspan=2, sticky="ew", pady=4)
+        
+        wrap.grid_columnconfigure(1, weight=1)
+        
+    def _save_settings(self):
+        settings["rtv_eq"] = self.rtv_eq_var.get().strip() or settings["rtv_eq"]
+        settings["cr_eq"] = self.cr_eq_var.get().strip() or settings["cr_eq"]
+        settings["theme"] = self.theme_var.get()
+        settings["monospace"] = bool(self.mono_var.get())
+        settings["rtl"] = bool(self.rtl_var.get())
+        save_json(SETTINGS_FILE, settings)
+        messagebox.showinfo("Settings", "Saved. Please restart to apply theme/font changes.")
+        
+    # ---------- events ----------
+    def bind_counts(self):
+        for v in (self.coth_vals, self.thme_vals, self.old_vals):
+            v.trace_add("write", self.update_counts)
+            
+    def toggle_old(self):
+        st = "normal" if self.old_check.get() else "disabled"
+        self.old_entry.configure(state=st)
+        self.update_counts()
+        
+    def update_counts(self, *_):
+        self.coth_lbl.configure(text=f"Count: {count_values(self.coth_vals.get())}")
+        self.thme_lbl.configure(text=f"Count: {count_values(self.thme_vals.get())}")
+        self.old_lbl.configure(text=f"Count: {count_values(self.old_vals.get())}")
+        
+    def _insert_separator(self, event):
+        # Replace a plain space with a clearer visual separator and keep editability
+        event.widget.insert("insert", " | ")
+        return "break"
+        
+    def clear_form(self):
+        for v in (self.part_name, self.diameter, self.coth_vals, self.thme_vals, self.old_vals):
+            v.set("")
+        self.notes.delete("1.0", "end")
+        self.photo_lbl.configure(image="", text="No image")
+        self.photo_path.set("")
+        self.old_check.set(False)
+        self.toggle_old()
+        
+    def browse_excel(self):
+        path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx")])
+        if path:
+            self.excel_path.set(path)
+            settings["last_excel"] = path
+            save_json(SETTINGS_FILE, settings)
+            # Load Excel data into current session
+            self.load_excel_data()
+            
+    def load_excel_data(self):
+        """Load data from the currently open Excel file into current session"""
+        path = settings.get("last_excel", "")
+        if not path or not os.path.isfile(path):
+            return
+            
+        try:
+            wb = load_workbook(path)
+            if "Results" not in wb.sheetnames:
+                return
+                
+            ws = wb["Results"]
+            
+            # Clear current session records
+            self.current_session_records = []
+            
+            # Parse the sheet to extract records
+            current_record = None
+            
+            for row in ws.iter_rows(values_only=True):
+                # Skip empty rows
+                if not any(cell is not None for cell in row):
+                    continue
+                    
+                # Check if this is a part name row (first cell is not None and others are None)
+                if row[0] and not any(row[1:]):
+                    # Save previous record if exists
+                    if current_record:
+                        self.current_session_records.append(current_record)
+                        
+                    # Start new record
+                    current_record = {
+                        "meta": {
+                            "part_name": row[0],
+                            "diameter": "",
+                            "notes": "",
+                            "photo": "",
+                            "datetime": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        },
+                        "headers": [],
+                        "data": []
+                    }
+                # Check if this is a diameter row
+                elif row[0] and isinstance(row[0], str) and row[0].startswith("Diameter:"):
+                    if current_record:
+                        current_record["meta"]["diameter"] = row[0].replace("Diameter:", "").strip()
+                # Check if this is a header row
+                elif row[0] and "Point" in str(row[0]):
+                    if current_record:
+                        current_record["headers"] = [str(cell) for cell in row if cell]
+                # Check if this is a data row
+                elif row[0] and isinstance(row[0], (int, float)):
+                    if current_record and current_record["headers"]:
+                        current_record["data"].append([cell for cell in row if cell is not None])
+                # Check if this is a notes row
+                elif row[0] and isinstance(row[0], str) and row[0] == "Notes:":
+                    if current_record:
+                        # Next row should contain the notes
+                        pass
+                # This might be the notes content
+                elif current_record and not current_record["meta"]["notes"] and row[0]:
+                    current_record["meta"]["notes"] = str(row[0])
+                    
+            # Add the last record
+            if current_record:
+                self.current_session_records.append(current_record)
+                
+            # Refresh history list
+            self.refresh_history_list()
+            
+        except Exception as e:
+            print(f"Error loading Excel data: {e}")
+            
+    def browse_photo(self):
+        path = filedialog.askopenfilename(filetypes=[("Images", "*.png *.jpg *.jpeg")])
+        if path:
+            img = Image.open(path).resize((120, 120))
+            self.photo_img = ctk.CTkImage(img, size=(120, 120))
+            self.photo_lbl.configure(image=self.photo_img, text="")
+            self.photo_path.set(path)
+            
+    def open_excel(self):
+        path = settings.get("last_excel", "")
+        if os.path.isfile(path):
+            os.startfile(path) if os.name == "nt" else os.system(f"xdg-open '{path}'")
+            
+    # ---------- calculate ----------
+    def calculate(self):
+        name = self.part_name.get().strip()
+        if not name:
+            messagebox.showwarning("Input", "Please enter Part Name.")
+            return
+            
+        path = settings.get("last_excel", "")
+        if not os.path.isfile(path):
+            messagebox.showwarning("File", "Please select an Excel file first.")
+            return
+            
+        try:
+            coth = parse_values(self.coth_vals.get())
+            thme = parse_values(self.thme_vals.get())
+            old  = parse_values(self.old_vals.get()) if self.old_check.get() else []
+            if len(set(map(len, [coth, thme, *(old and [old] or [])]))) != 1:
+                messagebox.showerror("Mismatch", "All vectors must be same length.")
+                return
+        except ValueError:
+            messagebox.showerror("Value", "Only numbers separated by space/comma/| .")
+            return
+            
+        rtv = safe_eval(settings["rtv_eq"], coth=np.array(coth), thme=np.array(thme))
+        if rtv is None:
+            return
+            
+        cr  = safe_eval(settings["cr_eq"], old_real_thickness=np.array(old), RTV=rtv) if old else None
+        
+        headers = ["Point", "COth (mm)", "THme (mm)", "RTV (mm)"]
+        if cr is not None:
+            headers += ["Old (mm)", "CR (mm)"]
+            
+        table = [[i + 1, c, t, round(r, 2)] + ([old[i], round(cr[i], 2)] if cr is not None else []) 
+                 for i, (c, t, r) in enumerate(zip(coth, thme, rtv))]
+        
+        # display header (part, dia) above data in Results
+        dia = (self.diameter.get() or "-")
+        self.header_label.configure(text=f"Part: {name}    |    Diameter: {dia} mm")
+        
+        # display table with proper alignment
+        self.result_text.delete("1.0", "end")
+        tbl = tabulate(
+            table,
+            headers=headers,
+            tablefmt="github",
+            floatfmt=".2f",
+            numalign="center",
+            stralign="center",
+        )
+        self.result_text.insert("end", tbl)
+        
+        # excel
+        wb = load_workbook(path) if os.path.isfile(path) else Workbook()
+        ws = wb["Results"] if "Results" in wb.sheetnames else wb.create_sheet("Results")
+        row = ws.max_row + 2
+        
+        ws.cell(row, 1, name).font = Font(bold=True)
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=len(headers))
+        row += 1
+        
+        if self.diameter.get():
+            ws.cell(row, 1, f"Diameter: {self.diameter.get()} mm").font = Font(bold=True)
+            ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=len(headers))
+            row += 1
+            
+        for c, h in enumerate(headers, 1):
+            cell = ws.cell(row, c, h)
+            cell.font = Font(bold=True)
+            cell.alignment = Alignment(horizontal="center")
+            
+        for r, d in enumerate(table, row + 1):
+            for c, v in enumerate(d, 1):
+                ws.cell(r, c, v).alignment = Alignment(horizontal="center")
+                
+        notes = self.notes.get("1.0", "end").strip()
+        if notes:
+            r = ws.max_row + 2
+            ws.cell(r, 1, "Notes:").font = Font(bold=True)
+            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=len(headers))
+            ws.cell(r + 1, 1, notes)
+            
+        wb.save(path)
+        
+        # memory
+        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        key = f"{name} {now_str}"
+        record = {
+            "headers": headers,
+            "data": table,
+            "meta": {
+                "part_name": name,
+                "diameter": self.diameter.get(),
+                "notes": notes,
+                "photo": self.photo_path.get(),
+                "datetime": now_str,
+            },
+        }
+        
+        # Add to memory
+        self.memory[key] = record
+        self.records = list(self.memory.values())[-500:]
+        save_json(MEMORY_FILE, self.memory)
+        
+        # Add to current session records
+        self.current_session_records.append(record)
+        
+        # Refresh history list
+        self.refresh_history_list()
+        
+        # Clear form after saving
+        self.clear_form()
+        
+    # ---------- exports ----------
+    def export_csv(self):
+        if not self.current_session_records:
+            messagebox.showwarning("Export", "No data in current session.")
+            return
+            
+        path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+        if not path:
+            return
+            
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            for rec in self.current_session_records:
+                writer.writerow([])
+                writer.writerow([rec["meta"].get("part_name", ""), rec["meta"].get("datetime", "")])
+                writer.writerow(rec["headers"])
+                writer.writerows(rec["data"])
+                
+        messagebox.showinfo("Export", "CSV exported.")
+        
+    def export_pdf(self):
+        if not self.current_session_records:
+            messagebox.showwarning("Export", "No data in current session.")
+            return
+            
+        # Import Excel data if available
+        excel_data = None
+        excel_path = settings.get("last_excel", "")
+        if excel_path and os.path.isfile(excel_path):
+            try:
+                wb = load_workbook(excel_path)
+                if "Results" in wb.sheetnames:
+                    ws = wb["Results"]
+                    
+                    # Parse the sheet to extract records
+                    records = []
+                    current_record = None
+                    
+                    for row in ws.iter_rows(values_only=True):
+                        # Skip empty rows
+                        if not any(cell is not None for cell in row):
+                            continue
+                            
+                        # Check if this is a part name row
+                        if row[0] and not any(row[1:]):
+                            # Save previous record if exists
+                            if current_record:
+                                records.append(current_record)
+                                
+                            # Start new record
+                            current_record = {
+                                "part_name": row[0],
+                                "diameter": "",
+                                "headers": [],
+                                "data": []
+                            }
+                        # Check if this is a diameter row
+                        elif row[0] and isinstance(row[0], str) and row[0].startswith("Diameter:"):
+                            if current_record:
+                                current_record["diameter"] = row[0].replace("Diameter:", "").strip()
+                        # Check if this is a header row
+                        elif row[0] and "Point" in str(row[0]):
+                            if current_record:
+                                current_record["headers"] = [str(cell) for cell in row if cell]
+                        # Check if this is a data row
+                        elif row[0] and isinstance(row[0], (int, float)):
+                            if current_record and current_record["headers"]:
+                                current_record["data"].append([cell for cell in row if cell is not None])
+                                
+                    # Add the last record
+                    if current_record:
+                        records.append(current_record)
+                        
+                    excel_data = records
+            except Exception as e:
+                print(f"Error reading Excel data: {e}")
+        
+        # Show PDF export dialog
+        PDFExportDialog(self, self.current_session_records, self.colors, excel_data)
+        
+    # ---------- history ----------
+    def filter_history(self, *_):
+        term = self.search_var.get().lower()
+        self.history_listbox.delete(0, "end")
+        for rec in self.current_session_records:
+            if isinstance(rec, dict) and "meta" in rec:
+                pn = rec["meta"].get("part_name", "Unknown")
+                dt = rec["meta"].get("datetime", "No Date")
+                if term in pn.lower():
+                    self.history_listbox.insert("end", f"{pn}  {dt}")
+                    
+    def refresh_history_list(self):
+        self.history_listbox.delete(0, "end")
+        for rec in self.current_session_records:
+            if isinstance(rec, dict) and "meta" in rec:
+                pn = rec["meta"].get("part_name", "Unknown")
+                dt = rec["meta"].get("datetime", "No Date")
+                self.history_listbox.insert("end", f"{pn}  {dt}")
+                
+    def show_history_record(self, _):
+        idx = self.history_listbox.curselection()
+        if not idx:
+            return
+            
+        rec = self.current_session_records[idx[0]]
+        self.history_text.delete("1.0", "end")
+        
+        # Display part name and date
+        part_name = rec["meta"].get("part_name", "Unknown")
+        date_time = rec["meta"].get("datetime", "No Date")
+        diameter = rec["meta"].get("diameter", "-") or "-"
+        notes = rec["meta"].get("notes", "")
+        photo_path = rec["meta"].get("photo", "")
+        
+        # Format the details
+        details = f"Part Name: {part_name}\n"
+        details += f"Date/Time: {date_time}\n"
+        details += f"Diameter: {diameter} mm\n\n"
+        
+        # Add table
+        if rec["headers"] and rec["data"]:
+            tbl = tabulate(
+                rec["data"],
+                headers=rec["headers"],
+                tablefmt="github",
+                floatfmt=".2f",
+                numalign="center",
+                stralign="center",
+            )
+            details += tbl + "\n\n"
+        
+        # Add notes if available
+        if notes:
+            details += f"Notes:\n{notes}\n\n"
+        
+        # Add photo info if available
+        if photo_path:
+            details += f"Photo: {photo_path}\n"
+        
+        self.history_text.insert("end", details)
+
+# ---------- run ----------
+if __name__ == "__main__":
+    app = App()
+    app.mainloop()
