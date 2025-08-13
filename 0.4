@@ -2240,7 +2240,7 @@ class App(ctk.CTk):
                 # Format the details
                 details = ""
                 
-                # Add table with proper data validation
+                 # Add table with proper data validation
                 if rec["headers"] and rec["data"]:
                     try:
                         # Ensure data and headers have the same number of columns
@@ -2260,30 +2260,30 @@ class App(ctk.CTk):
                                     valid_data.append(padded_row)
                             
                             if valid_data:
-                                                        tbl = tabulate(
-                            valid_data,
-                            headers=rec["headers"],
-                            tablefmt="github",  # Same format as Results tab
-                            floatfmt=".2f",
-                            numalign="center",
-                            stralign="center",
-                        )
-                        details += tbl + "\n\n"
+                                tbl = tabulate(
+                                    valid_data,
+                                    headers=rec["headers"],
+                                    tablefmt="github",  # Same format as Results tab
+                                    floatfmt=".2f",
+                                    numalign="center",
+                                    stralign="center",
+                                )
+                                details += tbl + "\n\n"
                             else:
                                 details += "No valid data rows found.\n\n"
                         else:
                             details += "Data structure is empty.\n\n"
                     except Exception as e:
-                        details += f"Error formatting table: {e}\n\n"
+                        details += f"Error formatting table: {str(e)}\n\n"
                         # Fallback: show raw data
                         details += "Raw Data:\n"
                         for i, row in enumerate(rec["data"]):
                             details += f"Row {i+1}: {row}\n"
                         details += "\n"
-                
+               
                 # Add notes if available
                 if rec["meta"].get("notes"):
-                    details += f"Notes:\n{rec['meta'].get('notes')}\n\n"
+                   details += f"Notes:\n{rec['meta'].get('notes')}\n\n"
                 
                 # Add photo info if available
                 if rec["meta"].get("photo"):
@@ -3095,6 +3095,7 @@ class App(ctk.CTk):
                         idx = record["headers"].index("THme (mm)")
                         thickness_data = [row[idx] for row in record["data"]]
                         if thickness_data:
+                            thickness_trends.append(sum(thickness_data) / len(thickness_data))
                             thickness_trends.append(sum(thickness_data) / len(thickness_data))
                     
                     if "COth (mm)" in record["headers"]:
